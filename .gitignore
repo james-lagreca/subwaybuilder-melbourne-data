@@ -1,0 +1,48 @@
+# Generated map artefacts (uploaded as Release assets, not committed)
+*.osm.pbf
+*.osrm
+*.osrm.*
+*.pmtiles
+/MEL/
+/out/
+
+# Demand data
+demand_data.json
+demand_data_fixed.json
+demand_data_out.json
+melbourne_with_schools.json
+
+# ABS Census raw data — too large to commit; users re-download from ABS
+*.zip
+MB_2021_AUST*.shp
+MB_2021_AUST*.dbf
+MB_2021_AUST*.shx
+MB_2021_AUST*.prj
+MB_2021_AUST*.xml
+MB_2021_AUST*.sbx
+DZN_2021_AUST*.shp
+DZN_2021_AUST*.dbf
+DZN_2021_AUST*.shx
+DZN_2021_AUST*.prj
+DZN_2021_AUST*.xml
+DZN_2021_AUST*.sbx
+DZN_2021_AUST*.sbn
+DZN_2021_AUST*.CPG
+2021Census_*.csv
+
+# depot/planetiler runtime data cache
+/data/
+
+# Demand-Adder binary (download manually per README)
+create_new_demand_points_*.exe
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store
+Thumbs.db

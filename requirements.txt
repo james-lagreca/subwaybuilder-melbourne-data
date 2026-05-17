@@ -1,0 +1,3 @@
+# Demand pipeline only — basemap generation uses the depot conda env separately.
+# Currently the pipeline uses only Python's standard library (csv, json, urllib,
+# subprocess). Listed here for future-proofing; no install needed today.
