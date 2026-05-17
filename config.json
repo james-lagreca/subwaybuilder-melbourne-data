@@ -1,0 +1,15 @@
+{
+  "code": "MEL",
+  "name": "Melbourne",
+  "description": "Greater Melbourne, Geelong, the Mornington Peninsula and Phillip Island",
+  "initialViewState": {
+    "zoom": 11,
+    "latitude": -37.8183,
+    "longitude": 144.9671,
+    "bearing": 0
+  },
+  "creator": "james-lagreca",
+  "version": "0.1.0",
+  "population": 5151156,
+  "country": "AU"
+}

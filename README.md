@@ -1,10 +1,10 @@
 # subwaybuilder-melbourne-data
 
-Map + demand data pipeline for the Melbourne mod for [Subway Builder Modded](https://subwaybuildermodded.com/).
+Map + demand data pipeline producing a **Railyard map** for [Subway Builder Modded](https://subwaybuildermodded.com/).
 
 Greater Melbourne + Geelong + full Mornington Peninsula + Phillip Island, working bbox `[144.25, -38.55, 145.65, -37.55]` — Lara/Geelong → Pakenham, Craigieburn → Cape Schanck/Penguin Parade. Modelled on Will Barouch's [Sydney](https://github.com/WillBarouch/subwaybuilder-sydney) pipeline.
 
-The generated artefacts are uploaded as GitHub Release assets; the companion mod repo (`subwaybuilder-melbourne`) loads them at runtime via `api.cities.setCityDataFiles()` + `api.map.setTileURLOverride()`.
+The generated artefacts are bundled into `melbourne.zip` and uploaded as a GitHub Release asset. The Railyard map manager (in-game) installs from this release into `metro-maker4/cities/data/MEL/`. No standalone TypeScript mod required — Railyard's built-in `mapLoader` registers the city.
 
 ## Output artefacts
 
