@@ -80,7 +80,12 @@ SA2_CODE_COLS = ["POW_SA2_CODE_2021", "SA2_CODE_2021", "SA2_CODE"]
 # suburb (they don't care if it's 700 m or 1.5 km, they care about pay).
 DESTINATIONS_PER_RESIDENCE = 8       # Sampled commute destinations per residence
 GRAVITY_BETA               = 1.4     # Distance decay exponent (above floor)
-EMPLOYMENT_RATE            = 0.45    # Fraction of residents that commute
+# Every resident generates pop volume — the Railyard registry validator
+# requires sum(point.residents) == sum(pop.size), interpreting "commute"
+# broadly (school trips, errands, leisure travel, not just work). If you
+# care only about employed-worker flows, drop this back to ~0.45 but the
+# resulting demand file will fail the registry's resident-totals check.
+EMPLOYMENT_RATE            = 1.0
 MAX_COMMUTE_M              = 80_000  # No commute beyond this radius
 CLOSE_DISTANCE_FLOOR_M     = 5_000   # Treat all distances < this as = this
 
