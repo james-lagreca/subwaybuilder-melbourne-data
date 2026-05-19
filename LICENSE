@@ -1,0 +1,60 @@
+MIT License
+
+Copyright (c) 2026 James La Greca
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## Upstream data attribution
+
+The generated map artefacts (PMTiles, GeoJSON, demand_data.json) are
+derivative works built from third-party data sources, each governed by its
+own licence. Use of the generated data must comply with all of the following:
+
+- **OpenStreetMap** — base road/water/landuse vectors. © OpenStreetMap
+  contributors, licensed under the Open Database Licence (ODbL) 1.0.
+  https://www.openstreetmap.org/copyright
+
+- **Overture Maps** — building footprints + heights. Buildings theme is
+  ODbL-licensed (derived from OSM and Microsoft Open Buildings). Other
+  Overture themes are CDLA-Permissive-2.0.
+  https://overturemaps.org/about/licensing/
+
+- **Australian Bureau of Statistics (ABS) 2021 Census** — Mesh Block
+  boundaries, SA1/SA2 statistical areas, G01 person counts, W01A
+  Place-of-Work counts. © Commonwealth of Australia, licensed under
+  Creative Commons Attribution 4.0 (CC BY 4.0).
+  https://www.abs.gov.au/website-privacy-disclaimer-and-copyright
+
+- **Victorian Department of Education** — school locations and enrolments
+  (`dv402-SchoolLocations2025`, `dv403-AllSchoolsEnrolments-2025`).
+  © State of Victoria, licensed under CC BY 4.0.
+  https://discover.data.vic.gov.au/
+
+Tooling acknowledgements:
+
+- **depot** — Subway Builder Modded map generation library
+  (https://github.com/Subway-Builder-Modded/depot, GPL-3.0).
+- **Demand-Adder** — `create_new_demand_points` binary by rslurry
+  (https://github.com/rslurry/Demand-Adder).
+- **subwaybuilder-sydney** — pipeline structure adapted from Will Barouch's
+  Sydney mod (https://github.com/WillBarouch/subwaybuilder-sydney, CC0-1.0).
+- **OSRM** — routing engine (https://github.com/Project-OSRM/osrm-backend,
+  BSD-2-Clause).

@@ -6,19 +6,28 @@ Greater Melbourne + Geelong + full Mornington Peninsula + Phillip Island, workin
 
 The generated artefacts are bundled into `melbourne.zip` and uploaded as a GitHub Release asset. The Railyard map manager (in-game) installs from this release into `metro-maker4/cities/data/MEL/`. No standalone TypeScript mod required — Railyard's built-in `mapLoader` registers the city.
 
+## Install
+
+In-game, open **Library → Install Maps → search "Melbourne"** once this map is in the Railyard registry. Until then, use **Import Asset → Choose ZIP** and select `melbourne.zip` from the latest [GitHub Release](https://github.com/james-lagreca/subwaybuilder-melbourne-data/releases/latest).
+
 ## Output artefacts
 
-Uploaded to a GitHub Release tag (e.g. `v0.1.0`):
+Each tagged GitHub Release ships these files inside `melbourne.zip` (flat structure, no subfolders):
 
 | File | Produced by | Purpose |
 |---|---|---|
-| `melbourne.pmtiles` | `build_basemap.py` (depot) | Vector basemap tiles |
-| `melbourne_foundations.pmtiles` | `build_basemap.py` (depot) | Foundation tiles |
-| `buildings_index.json` | `build_basemap.py` (depot) | Per-building footprints used for stations |
+| `MEL.pmtiles` | `build_basemap.py` (depot) | Vector basemap tiles (basemap layers + 3D building extrusions) |
+| `buildings_index.json` | `build_basemap.py` (depot) | Per-building footprints used for station placement |
 | `roads.geojson` | `build_basemap.py` (depot) | Road network for surface routing |
 | `runways_taxiways.geojson` | `build_basemap.py` (depot) | Airport runways/taxiways |
-| `demand_data.json` | `demand_generator.py` + Demand-Adder | Population, jobs, schools, attractions, bases |
-| `thumbnail.png` | screenshot, 1280×720 | City-picker thumbnail |
+| `demand_data.json` | `build_base_demand.py` + `demand_generator.py` + `peak_penalty.py` | Population, jobs, schools, attractions, bases — 13,395 demand points, 71k+ OSRM-routed commute flows |
+| `config.json` | hand-authored | Railyard map metadata |
+
+The individual files are also uploaded loose alongside the zip for direct-URL access.
+
+## License
+
+[MIT](./LICENSE). The generated map artefacts derive from third-party data sources (OSM, Overture, ABS 2021 Census, VIC Department of Education); see [LICENSE](./LICENSE) for full attribution and the licences that propagate to those derivative files.
 
 ## One-time setup
 
