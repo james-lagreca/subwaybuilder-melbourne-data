@@ -66,10 +66,23 @@ PERSON_COLS = ["Tot_P_P", "Person", "Persons",
 SA2_CODE_COLS = ["POW_SA2_CODE_2021", "SA2_CODE_2021", "SA2_CODE"]
 
 # Gravity-model parameters.
-DESTINATIONS_PER_RESIDENCE = 5     # Sampled commute destinations per residence
-GRAVITY_BETA               = 2.0   # Distance decay exponent
-EMPLOYMENT_RATE            = 0.45  # Fraction of residents that commute
-MAX_COMMUTE_M              = 80_000
+# β=2.0 gives a very steep distance decay that confines almost all commuting
+# to a tight radius — outer suburbs barely commute to CBD. Real Melbourne
+# commute patterns are radial-heavy (Frankston/Werribee/Geelong → CBD) and
+# fit better with β≈1.3-1.5. We also sample more destinations per residence
+# so the radial CBD pull doesn't get crowded out by nearby small employers.
+#
+# The close-distance plateau (CLOSE_DISTANCE_FLOOR_M) is the key knob for
+# stopping every residence from picking 6 neighbours and 2 anywhere-else.
+# Treating all distances under this threshold as equal effectively says
+# "for trips below the floor, only job-density matters, not micro-distance"
+# — which mirrors how people actually choose between 4 jobs in their own
+# suburb (they don't care if it's 700 m or 1.5 km, they care about pay).
+DESTINATIONS_PER_RESIDENCE = 8       # Sampled commute destinations per residence
+GRAVITY_BETA               = 1.4     # Distance decay exponent (above floor)
+EMPLOYMENT_RATE            = 0.45    # Fraction of residents that commute
+MAX_COMMUTE_M              = 80_000  # No commute beyond this radius
+CLOSE_DISTANCE_FLOOR_M     = 5_000   # Treat all distances < this as = this
 
 # OSRM concurrency. 16 threads + container on localhost handles ~500 req/s.
 OSRM_THREADS = 16
@@ -161,9 +174,19 @@ def load_sa1() -> gpd.GeoDataFrame:
 
 
 def add_jobs(sa1: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Read SA2 POW counts, distribute proportionally to each SA2's
-    constituent SA1s. ABS spec: SA2_CODE_2021 = first 9 chars of
-    SA1_CODE_2021, so the SA1->SA2 mapping is purely code-derived."""
+    """Read SA2 POW counts and distribute to each SA2's constituent SA1s
+    using **inverse-area weighting**.
+
+    Activity centres (Box Hill, Glen Waverley, Footscray, Geelong CBD, etc.)
+    concentrate jobs in tiny CBD-like SA1s — the station-plus-mall block —
+    while the surrounding residential SA1s are physically much larger and
+    contain few jobs each. Uniform-by-SA1-count distribution dilutes those
+    activity-centre SA1s into the average and weakens the radial pull from
+    nearby residences. Inverse-area gives the small SA1 a larger share of
+    its SA2's POW total, matching real urban form.
+
+    ABS spec: SA2_CODE_2021 = first 9 chars of SA1_CODE_2021, so the
+    SA1->SA2 mapping is purely code-derived."""
     pow_path = find_file(SA2_POW_NAMES)
 
     print(f"[4/6] Loading SA2 POW counts from {pow_path.name}...")
@@ -191,22 +214,38 @@ def add_jobs(sa1: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     print(f"      {len(pow_df):,} SA2s in file; "
           f"{pow_df['jobs'].sum():,} total VIC POW")
 
-    # Derive each SA1's parent SA2 from the SA1 code (first 9 digits).
+    print(f"[5/6] Distributing SA2 jobs by inverse SA1 area "
+          f"(concentrates in activity-centre SA1s)...")
+
+    # Project to Australian Albers equal-area (EPSG:3577) for accurate
+    # area-in-square-metres at Melbourne latitude.
+    sa1_proj = sa1.to_crs(epsg=3577)
+    sa1["area_m2"] = sa1_proj.geometry.area
+    sa1["inv_area"] = 1.0 / sa1["area_m2"].clip(lower=1.0)
+
+    # Derive parent SA2 from SA1 code and normalise inverse-area within
+    # each SA2 so per-SA1 weights sum to 1.
     sa1["SA2_CODE_2021"] = sa1["SA1_CODE_2021"].astype(str).str[:9]
-    sa1s_per_sa2 = sa1.groupby("SA2_CODE_2021").size()\
-        .reset_index(name="sa1_count")
+    sa2_total = (sa1.groupby("SA2_CODE_2021")["inv_area"]
+                    .sum()
+                    .rename("sa2_total_inv_area")
+                    .reset_index())
+    sa1 = sa1.merge(sa2_total, on="SA2_CODE_2021", how="left")
+    sa1["sa2_weight"] = (sa1["inv_area"]
+                         / sa1["sa2_total_inv_area"].clip(lower=1e-30))
 
-    pow_df = pow_df[["SA2_CODE_2021", "jobs"]].merge(
-        sa1s_per_sa2, on="SA2_CODE_2021", how="inner")
-    pow_df["jobs_per_sa1"] = (pow_df["jobs"]
-                              / pow_df["sa1_count"].clip(lower=1)).round().astype(int)
+    # Apply SA2 POW counts via the per-SA1 weight.
+    sa1 = sa1.merge(
+        pow_df[["SA2_CODE_2021", "jobs"]].rename(columns={"jobs": "sa2_jobs"}),
+        on="SA2_CODE_2021", how="left",
+    )
+    sa1["sa2_jobs"] = sa1["sa2_jobs"].fillna(0).astype(int)
+    sa1["jobs"] = (sa1["sa2_jobs"] * sa1["sa2_weight"]).round().astype(int)
 
-    print(f"[5/6] Distributing SA2 jobs evenly across constituent SA1s...")
-    sa1 = sa1.merge(pow_df[["SA2_CODE_2021", "jobs_per_sa1"]],
-                    on="SA2_CODE_2021", how="left")
-    sa1["jobs"] = sa1["jobs_per_sa1"].fillna(0).astype(int)
-    sa1 = sa1.drop(columns=["jobs_per_sa1"])
-    print(f"      {sa1['jobs'].sum():,} jobs distributed across "
+    sa1 = sa1.drop(columns=[
+        "area_m2", "inv_area", "sa2_total_inv_area", "sa2_weight", "sa2_jobs",
+    ])
+    print(f"      {sa1['jobs'].sum():,} jobs concentrated across "
           f"{(sa1['jobs'] > 0).sum():,} SA1s in bbox")
     return sa1
 
@@ -256,8 +295,11 @@ def gravity_commutes(points: list[dict], rng_seed: int = 42):
         if res[i] == 0:
             continue
         d = haversine_m(locs[i, 1], locs[i, 0], locs[:, 1], locs[:, 0])
+        # Apply the close-distance plateau before the gravity decay so
+        # near-neighbours don't accumulate runaway weight from low d^β.
+        d_eff = np.maximum(d, CLOSE_DISTANCE_FLOOR_M)
         with np.errstate(invalid="ignore", divide="ignore"):
-            w = jobs / (d ** GRAVITY_BETA + 1.0)
+            w = jobs / (d_eff ** GRAVITY_BETA)
         w[d > MAX_COMMUTE_M] = 0
         w[i] = 0  # never commute to self
         s = w.sum()
