@@ -80,12 +80,14 @@ SA2_CODE_COLS = ["POW_SA2_CODE_2021", "SA2_CODE_2021", "SA2_CODE"]
 # suburb (they don't care if it's 700 m or 1.5 km, they care about pay).
 DESTINATIONS_PER_RESIDENCE = 8       # Sampled commute destinations per residence
 GRAVITY_BETA               = 1.4     # Distance decay exponent (above floor)
-# Every resident generates pop volume — the Railyard registry validator
-# requires sum(point.residents) == sum(pop.size), interpreting "commute"
-# broadly (school trips, errands, leisure travel, not just work). If you
-# care only about employed-worker flows, drop this back to ~0.45 but the
-# resulting demand file will fail the registry's resident-totals check.
-EMPLOYMENT_RATE            = 1.0
+# Fraction of ABS Persons Usually Resident that has a daily structured
+# commute trip (employed workers + students + commute-equivalent travel).
+# Applied at point construction so `point.residents` represents commute
+# origins (the Railyard schema interpretation), not total population.
+# VIC LFS gives ~67% labour-force participation × ~95% employed × ~80%
+# working-age share of total population ≈ 51%; add students (~10% beyond
+# overlap) -> ~0.55 weekday commute participation.
+EMPLOYMENT_RATE            = 0.55
 MAX_COMMUTE_M              = 80_000  # No commute beyond this radius
 CLOSE_DISTANCE_FLOOR_M     = 5_000   # Treat all distances < this as = this
 
@@ -267,10 +269,15 @@ def build_points(sa1: gpd.GeoDataFrame) -> list[dict]:
 
     points = []
     for _, row in sa1.iterrows():
+        # Apply commute-participation discount HERE so `point.residents`
+        # represents commute origins (the Railyard schema interpretation),
+        # not ABS Persons Usually Resident. gravity_commutes() then treats
+        # res[i] as the definitive commuter count without further scaling.
+        commuters = int(round(float(row["residents"]) * EMPLOYMENT_RATE))
         points.append({
             "id":        f"SA1_{row['SA1_CODE_2021']}",
             "location":  [round(row["lon"], 6), round(row["lat"], 6)],
-            "residents": int(row["residents"]),
+            "residents": commuters,
             "jobs":      int(row["jobs"]),
             "popIds":    [],
         })
@@ -312,7 +319,9 @@ def gravity_commutes(points: list[dict], rng_seed: int = 42):
             continue
         probs = w / s
 
-        n_commuters = int(res[i] * EMPLOYMENT_RATE)
+        # point.residents already represents commute origins (discount
+        # applied in build_points) — use it directly.
+        n_commuters = int(res[i])
         n_dests     = int(min(DESTINATIONS_PER_RESIDENCE, np.sum(w > 0)))
         if n_dests == 0 or n_commuters == 0:
             continue
