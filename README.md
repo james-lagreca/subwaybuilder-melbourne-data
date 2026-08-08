@@ -55,9 +55,9 @@ Each tagged release ships a single `melbourne.zip` (flat layout, no subfolders �
 
 | File | Size | Purpose |
 |---|---|---|
-| `config.json` | <1 KB | Railyard metadata (city code, name, initial view, version) |
+| `config.json` | <1 KB | Railyard metadata (city code, name, initial view, version, `buildingsIndexFile`) |
 | `MEL.pmtiles` | ~172 MB | Vector basemap + 3D building layer |
-| `buildings_index.json` | ~386 MB | Per-building polygons + heights for station collision |
+| `buildings_index.bin` | ~280 MB | Per-building polygons + spatial grid, binary "SBBI" format (**required by game >= 1.4**; the legacy `buildings_index.json` only works on <= 1.3.0 and is no longer shipped) |
 | `roads.geojson` | ~75 MB | Surface road network |
 | `runways_taxiways.geojson` | ~1 MB | Airport runways/taxiways |
 | `demand_data.json` | ~6.5 MB | 9.1k demand points + 35.9k consolidated commute pops |
@@ -117,6 +117,23 @@ python build_basemap.py
 Outputs land in `./MEL/` — `MEL.pmtiles`, `buildings_index.json`, `roads.geojson`, `runways_taxiways.geojson`. ~30–90 min depending on CPU. On first run, uncomment `mapgen.check_labels()` in `build_basemap.py` to confirm the `place=*` tag coverage matches the `cities` / `suburbs` / `neighborhoods` lists.
 
 Verify by opening `MEL/MEL.pmtiles` in [pmtiles.io](https://pmtiles.io).
+
+### Step 2b — Convert the buildings index to the binary format
+
+```bash
+python make_buildings_bin.py
+```
+
+Game 1.4+ reads only the binary "SBBI" buildings index; 1.6 dropped the
+JSON reader entirely. This converts `MEL/buildings_cleaned.json` (the
+depot intermediate) into `MEL/buildings_index.bin` + `.bin.gz` — a
+standalone port of depot v1.2.7's `create_buildings_index_binary()`, with
+foundation depths pinned to 1 m for parity with the v1.0.x index. Validate
+any bin (including the game's own) with:
+
+```bash
+python make_buildings_bin.py --check MEL/buildings_index.bin
+```
 
 ### Step 3 — Build the OSRM routing graph
 
@@ -211,7 +228,7 @@ referential-integrity rules, and the extent polygon.
 
 ```powershell
 # from PowerShell on Windows
-Compress-Archive -Path config.json,MEL\MEL.pmtiles,MEL\buildings_index.json,MEL\roads.geojson,MEL\runways_taxiways.geojson,demand_data.json `
+Compress-Archive -Path config.json,MEL\MEL.pmtiles,MEL\buildings_index.bin,MEL\roads.geojson,MEL\runways_taxiways.geojson,demand_data.json `
   -DestinationPath melbourne.zip -CompressionLevel Optimal
 
 gh release create v1.1.0 `
