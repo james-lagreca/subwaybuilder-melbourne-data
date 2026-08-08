@@ -2,9 +2,11 @@
 Build Melbourne base demand layer from ABS 2021 Census data.
 
 Produces `demand_data_fixed.json` with:
-  - One point per SA1 statistical area (~6,500 points in our bbox).
-    Each point has real residents (from Mesh Block counts) and real jobs
-    (from Destination Zone Place-of-Work counts, spatially joined to SA1).
+  - One point per SA1 statistical area inside the demand-extent polygon
+    (extent/mel_extent_v1_1.geojson — run make_extent.py first), with
+    outer-fringe SA1s collapsed to one point per parent SA2 (~6,000
+    points total). Each point has real residents (from Mesh Block counts)
+    and real jobs (from SA2 Place-of-Work counts distributed to SA1).
   - Commute flows ("pops") generated via gravity model, then real-routed
     through the running OSRM container for drivingDistance / drivingSeconds.
 
@@ -40,9 +42,25 @@ import pandas as pd
 # Config
 # ---------------------------------------------------------------------------
 
-BBOX = (144.25, -38.55, 145.65, -37.55)
+BBOX = (144.25, -38.42, 145.55, -37.55)  # envelope of the extent polygon
 OSRM_BASE   = "http://localhost:5000"
 OUTPUT_FILE = "demand_data_fixed.json"
+
+# Demand-extent polygon (non-rectangular). SA1s whose centroid falls
+# outside it get no demand at all — the basemap still renders there, so
+# Phillip Island etc. stay visible as scenery. Generated + validated by
+# make_extent.py.
+EXTENT_POLYGON = "extent/mel_extent_v1_1.geojson"
+
+# Fringe aggregation: outside these radii, SA1s with few jobs merge into
+# one point per parent SA2. Keeps activity centres (Dandenong South,
+# Frankston CBD, East Werribee, Avalon) at full SA1 granularity while
+# halving the origin-point count on the rural/outer fringe.
+CBD_LONLAT              = (144.9631, -37.8136)
+GEELONG_LONLAT          = (144.357, -38.147)
+FRINGE_CBD_RADIUS_M     = 25_000
+FRINGE_GEELONG_RADIUS_M = 12_000
+FRINGE_KEEP_JOBS        = 2_000   # SA1s with >= this many jobs never merge
 
 # File-discovery candidates (different ABS download bundles use slightly
 # different names; this lets you not have to rename your downloads).
@@ -69,8 +87,13 @@ SA2_CODE_COLS = ["POW_SA2_CODE_2021", "SA2_CODE_2021", "SA2_CODE"]
 # β=2.0 gives a very steep distance decay that confines almost all commuting
 # to a tight radius — outer suburbs barely commute to CBD. Real Melbourne
 # commute patterns are radial-heavy (Frankston/Werribee/Geelong → CBD) and
-# fit better with β≈1.3-1.5. We also sample more destinations per residence
-# so the radial CBD pull doesn't get crowded out by nearby small employers.
+# fit better with β≈1.3-1.5.
+#
+# DESTINATIONS_PER_RESIDENCE is the main pop-count lever: each origin
+# spawns up to this many FLOW pops. v1.0.x used 8, which (x ~12k origins)
+# produced ~96k FLOW pops — ~4x what stock cities simulate and the
+# dominant in-game performance cost. v1.1.0 uses 4; consolidate_pops.py
+# then merges same-origin flows toward stock pop sizes.
 #
 # The close-distance plateau (CLOSE_DISTANCE_FLOOR_M) is the key knob for
 # stopping every residence from picking 6 neighbours and 2 anywhere-else.
@@ -78,7 +101,7 @@ SA2_CODE_COLS = ["POW_SA2_CODE_2021", "SA2_CODE_2021", "SA2_CODE"]
 # "for trips below the floor, only job-density matters, not micro-distance"
 # — which mirrors how people actually choose between 4 jobs in their own
 # suburb (they don't care if it's 700 m or 1.5 km, they care about pay).
-DESTINATIONS_PER_RESIDENCE = 8       # Sampled commute destinations per residence
+DESTINATIONS_PER_RESIDENCE = 4       # Sampled commute destinations per residence
 GRAVITY_BETA               = 1.4     # Distance decay exponent (above floor)
 # Fraction of ABS Persons Usually Resident that has a daily structured
 # commute trip (employed workers + students + commute-equivalent travel).
@@ -122,6 +145,27 @@ def find_col(df: pd.DataFrame, candidates: list[str], label: str) -> str:
     )
 
 
+def load_extent_polygon():
+    """Load the demand-extent polygon written by make_extent.py."""
+    from shapely.geometry import shape
+
+    p = Path(EXTENT_POLYGON)
+    if not p.exists():
+        sys.exit(
+            f"ERROR: {EXTENT_POLYGON} not found.\n"
+            f"       Run `python make_extent.py` first — it generates and "
+            f"validates the demand-extent polygon."
+        )
+    gj = json.loads(p.read_text(encoding="utf-8"))
+    if gj.get("type") == "FeatureCollection":
+        geom = gj["features"][0]["geometry"]
+    elif gj.get("type") == "Feature":
+        geom = gj["geometry"]
+    else:
+        geom = gj
+    return shape(geom)
+
+
 def check_osrm() -> None:
     try:
         url = f"{OSRM_BASE}/nearest/v1/driving/144.9671,-37.8183"
@@ -148,7 +192,7 @@ def load_sa1() -> gpd.GeoDataFrame:
     mb_path  = find_file(MB_FILE_NAMES)
     gcp_path = find_file(SA1_GCP_NAMES)
 
-    print(f"[1/6] Loading mesh block boundaries from {mb_path.name}...")
+    print(f"[1/7] Loading mesh block boundaries from {mb_path.name}...")
     mb = gpd.read_file(mb_path, bbox=BBOX)
     print(f"      {len(mb):,} MBs in bbox")
     mb = mb.rename(columns={
@@ -159,14 +203,23 @@ def load_sa1() -> gpd.GeoDataFrame:
         mb = mb.to_crs(epsg=4326)
     mb["SA1_CODE_2021"] = mb["SA1_CODE_2021"].astype(str)
 
-    print(f"[2/6] Dissolving to SA1 (the slow step — ~1-3 min)...")
+    print(f"[2/7] Dissolving to SA1 (the slow step — ~1-3 min)...")
     t0 = time.time()
     sa1 = mb.dissolve(by="SA1_CODE_2021").reset_index()
     sa1 = sa1[["SA1_CODE_2021", "geometry"]]
     print(f"      Dissolve took {time.time() - t0:.1f}s; "
           f"{len(sa1):,} SA1s")
 
-    print(f"[3/6] Joining residents from {gcp_path.name}...")
+    # Non-rectangular demand extent: keep only SA1s whose centroid falls
+    # inside the polygon. Boundary SA1s are kept/dropped wholesale — the
+    # centroid test is the same convention build_points uses for the
+    # point location itself.
+    poly = load_extent_polygon()
+    n_before = len(sa1)
+    sa1 = sa1[sa1.geometry.centroid.within(poly)].copy()
+    print(f"      Extent polygon kept {len(sa1):,}/{n_before:,} SA1s")
+
+    print(f"[3/7] Joining residents from {gcp_path.name}...")
     gcp = pd.read_csv(gcp_path, dtype={"SA1_CODE_2021": str})
     person_col = find_col(gcp, PERSON_COLS, "person")
     gcp = gcp.rename(columns={person_col: "residents"})
@@ -196,7 +249,7 @@ def add_jobs(sa1: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     SA1->SA2 mapping is purely code-derived."""
     pow_path = find_file(SA2_POW_NAMES)
 
-    print(f"[4/6] Loading SA2 POW counts from {pow_path.name}...")
+    print(f"[4/7] Loading SA2 POW counts from {pow_path.name}...")
     pow_df = pd.read_csv(pow_path)
 
     # Find the SA2 code column (named POW_SA2_CODE_2021 in W01A).
@@ -221,7 +274,7 @@ def add_jobs(sa1: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     print(f"      {len(pow_df):,} SA2s in file; "
           f"{pow_df['jobs'].sum():,} total VIC POW")
 
-    print(f"[5/6] Distributing SA2 jobs by inverse SA1 area "
+    print(f"[5/7] Distributing SA2 jobs by inverse SA1 area "
           f"(concentrates in activity-centre SA1s)...")
 
     # Project to Australian Albers equal-area (EPSG:3577) for accurate
@@ -261,24 +314,76 @@ def add_jobs(sa1: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 # Points + gravity model
 # ---------------------------------------------------------------------------
 
-def build_points(sa1: gpd.GeoDataFrame) -> list[dict]:
-    sa1 = sa1[(sa1["residents"] > 0) | (sa1["jobs"] > 0)].copy()
-    sa1["centroid"] = sa1.geometry.centroid
-    sa1["lon"] = sa1["centroid"].x
-    sa1["lat"] = sa1["centroid"].y
+def aggregate_fringe(sa1: gpd.GeoDataFrame) -> pd.DataFrame:
+    """[6/7] Collapse outer-fringe SA1s to one point per parent SA2.
+
+    An SA1 merges into its SA2 aggregate when it is outside BOTH the CBD
+    and Geelong radii AND has fewer than FRINGE_KEEP_JOBS jobs. Job-heavy
+    fringe SA1s (activity centres, Avalon Airport) survive at full
+    granularity. Aggregate location = residents-weighted centroid of the
+    member SA1 centroids (jobs-weighted if the group has no residents).
+
+    Returns a plain DataFrame [point_id, lon, lat, residents, jobs] mixing
+    SA1_<code> core rows with SA2_<code> aggregate rows.
+    """
+    cent = sa1.geometry.centroid
+    df = pd.DataFrame({
+        "sa1":       sa1["SA1_CODE_2021"].astype(str).to_numpy(),
+        "sa2":       sa1["SA2_CODE_2021"].astype(str).to_numpy(),
+        "lon":       cent.x.to_numpy(),
+        "lat":       cent.y.to_numpy(),
+        "residents": sa1["residents"].to_numpy(),
+        "jobs":      sa1["jobs"].to_numpy(),
+    })
+
+    d_cbd = haversine_m(df["lat"].to_numpy(), df["lon"].to_numpy(),
+                        CBD_LONLAT[1], CBD_LONLAT[0])
+    d_glg = haversine_m(df["lat"].to_numpy(), df["lon"].to_numpy(),
+                        GEELONG_LONLAT[1], GEELONG_LONLAT[0])
+    fringe = ((d_cbd > FRINGE_CBD_RADIUS_M)
+              & (d_glg > FRINGE_GEELONG_RADIUS_M)
+              & (df["jobs"].to_numpy() < FRINGE_KEEP_JOBS))
+
+    core = df[~fringe].copy()
+    core["point_id"] = "SA1_" + core["sa1"]
+
+    rows = []
+    for sa2, g in df[fringe].groupby("sa2"):
+        w = g["residents"].to_numpy(dtype=float)
+        if w.sum() <= 0:
+            w = g["jobs"].to_numpy(dtype=float)
+        if w.sum() <= 0:
+            w = np.ones(len(g))
+        rows.append({
+            "point_id":  f"SA2_{sa2}",
+            "lon":       float(np.average(g["lon"].to_numpy(), weights=w)),
+            "lat":       float(np.average(g["lat"].to_numpy(), weights=w)),
+            "residents": int(g["residents"].sum()),
+            "jobs":      int(g["jobs"].sum()),
+        })
+    cols = ["point_id", "lon", "lat", "residents", "jobs"]
+    agg = pd.DataFrame(rows, columns=cols)
+
+    print(f"[6/7] Fringe aggregation: {int(fringe.sum()):,} fringe SA1s -> "
+          f"{len(agg):,} SA2 points; {len(core):,} core SA1s kept")
+    return pd.concat([core[cols], agg[cols]], ignore_index=True)
+
+
+def build_points(df: pd.DataFrame) -> list[dict]:
+    df = df[(df["residents"] > 0) | (df["jobs"] > 0)]
 
     points = []
-    for _, row in sa1.iterrows():
+    for row in df.itertuples():
         # Apply commute-participation discount HERE so `point.residents`
         # represents commute origins (the Railyard schema interpretation),
         # not ABS Persons Usually Resident. gravity_commutes() then treats
         # res[i] as the definitive commuter count without further scaling.
-        commuters = int(round(float(row["residents"]) * EMPLOYMENT_RATE))
+        commuters = int(round(float(row.residents) * EMPLOYMENT_RATE))
         points.append({
-            "id":        f"SA1_{row['SA1_CODE_2021']}",
-            "location":  [round(row["lon"], 6), round(row["lat"], 6)],
+            "id":        row.point_id,
+            "location":  [round(row.lon, 6), round(row.lat, 6)],
             "residents": commuters,
-            "jobs":      int(row["jobs"]),
+            "jobs":      int(row.jobs),
             "popIds":    [],
         })
     return points
@@ -362,7 +467,7 @@ def _osrm_route(origin, dest):
 
 
 def route_all(points, flows):
-    print(f"[6/6] Routing {len(flows):,} flows via OSRM "
+    print(f"[7/7] Routing {len(flows):,} flows via OSRM "
           f"({OSRM_THREADS} threads)...")
     results = [None] * len(flows)
 
@@ -401,7 +506,8 @@ def main():
 
     sa1    = load_sa1()
     sa1    = add_jobs(sa1)
-    points = build_points(sa1)
+    pts_df = aggregate_fringe(sa1)
+    points = build_points(pts_df)
     print()
     print(f"Total points:    {len(points):,}")
     print(f"Total residents: {sum(p['residents'] for p in points):,}")

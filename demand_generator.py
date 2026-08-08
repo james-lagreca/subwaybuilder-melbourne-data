@@ -97,8 +97,26 @@ def _read_vic_csv(path: Path) -> tuple[list[dict], list[str]]:
     return rows, headers
 
 
-def load_schools(script_dir: Path, bbox: list, min_enrolment: int) -> list:
-    """Load Victorian schools from the DataVic open datasets and filter to bbox.
+def load_extent_polygon(path: Path):
+    """Load a GeoJSON polygon (Feature / FeatureCollection / bare geometry)
+    for the optional --extent-polygon school filter. Imported lazily so
+    shapely is only required when the flag is used."""
+    from shapely.geometry import shape
+
+    gj = json.loads(path.read_text(encoding="utf-8"))
+    if gj.get("type") == "FeatureCollection":
+        geom = gj["features"][0]["geometry"]
+    elif gj.get("type") == "Feature":
+        geom = gj["geometry"]
+    else:
+        geom = gj
+    return shape(geom)
+
+
+def load_schools(script_dir: Path, bbox: list, min_enrolment: int,
+                 extent_poly=None) -> list:
+    """Load Victorian schools from the DataVic open datasets and filter to bbox
+    (and, when provided, to the non-rectangular demand-extent polygon).
 
     Joins dv403 (enrolments) and dv402 (locations) on `School_No`. Both
     files cover Government, Catholic and Independent schools, so this is
@@ -175,14 +193,26 @@ def load_schools(script_dir: Path, bbox: list, min_enrolment: int) -> list:
             pass
     print(f"  Loaded {len(locations)} school locations.")
 
+    if extent_poly is not None:
+        from shapely.geometry import Point
+
     matched = []
+    outside_polygon = 0
     for sid, profile in profiles.items():
         if sid not in locations:
             continue
         loc = locations[sid]
         if not in_bbox(loc["lat"], loc["lon"], bbox):
             continue
+        if extent_poly is not None \
+                and not extent_poly.contains(Point(loc["lon"], loc["lat"])):
+            outside_polygon += 1
+            continue
         matched.append({**profile, "lat": loc["lat"], "lon": loc["lon"]})
+
+    if extent_poly is not None:
+        print(f"  Extent polygon dropped {outside_polygon} in-bbox schools "
+              f"(Torquay/Ocean Grove/peninsula-tip etc.)")
 
     matched.sort(key=lambda s: s["enrolment"], reverse=True)
 
@@ -340,6 +370,11 @@ def main():
         help=f"Minimum school enrolment to include (default: {MIN_ENROLMENT})"
     )
     parser.add_argument(
+        "--extent-polygon", default=None,
+        help="Optional GeoJSON polygon (e.g. extent/mel_extent_v1_1.geojson); "
+             "schools outside it are skipped in addition to the bbox check"
+    )
+    parser.add_argument(
         "--skip-schools", action="store_true",
         help="Skip school injection step"
     )
@@ -371,9 +406,21 @@ def main():
 
     bbox = config.get("bbox") or BBOX_DEFAULT
 
+    extent_poly = None
+    if args.extent_polygon:
+        poly_path = Path(args.extent_polygon)
+        if not poly_path.is_absolute():
+            poly_path = script_dir / poly_path
+        if not poly_path.exists():
+            print(f"ERROR: Extent polygon not found: {poly_path}")
+            print("       Run `python make_extent.py` first.")
+            sys.exit(1)
+        extent_poly = load_extent_polygon(poly_path)
+
     if not args.skip_schools:
         print("[1/3] Injecting schools into config...")
-        schools = load_schools(script_dir, bbox, args.min_enrolment)
+        schools = load_schools(script_dir, bbox, args.min_enrolment,
+                               extent_poly=extent_poly)
         config  = inject_schools(config, schools)
 
         out_config = config_path.with_stem(config_path.stem + "_with_schools")

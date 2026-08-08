@@ -1,7 +1,7 @@
 {
   "code": "MEL",
   "name": "Melbourne",
-  "description": "Greater Melbourne, Geelong, the Mornington Peninsula and Phillip Island",
+  "description": "Greater Melbourne and Geelong — demand across the full metro rail footprint; Phillip Island and the outer coast render as scenery",
   "initialViewState": {
     "zoom": 11,
     "latitude": -37.8183,
@@ -9,8 +9,8 @@
     "bearing": 0
   },
   "creator": "james-lagreca",
-  "version": "1.0.3",
-  "population": 5151156,
+  "version": "1.1.0",
+  "population": 4456418,
+  "demandDotScaling": 0.75,
   "country": "AU"
 }
-

@@ -10,7 +10,10 @@
 demand_data.json
 demand_data_fixed.json
 demand_data_out.json
+demand_data_consolidated.json
+demand_data_v*.json
 melbourne_with_schools.json
+*.log
 
 # ABS Census raw data — too large to commit; users re-download from ABS
 *.zip

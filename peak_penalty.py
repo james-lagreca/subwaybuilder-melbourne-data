@@ -13,17 +13,18 @@ Distance-graduated multiplier (one-way trip):
   20-50 km radial     ×1.50   Monash/Tullamarine/M1 freeway congestion
   >  50 km long-haul  ×1.60   Geelong/Pakenham-CBD type trips
 
-Run AFTER demand_generator.py produces demand_data.json (its OSRM-routed
-output). In-place rewrite. Safe to re-run — uses drivingDistance to derive
-the multiplier so repeated runs compound. Don't run it twice on the same
-file (or compound penalties stack). If unsure, regenerate from demand-adder.
+Pure transform: reads demand_data_consolidated.json (consolidate_pops.py
+output) and writes demand_data.json. Because the un-penalised input file
+is never overwritten, re-running always recomputes from scratch —
+penalties can no longer compound. Run balance_pops.py after this.
 """
 
 import json
 import sys
 from pathlib import Path
 
-INPUT = Path("demand_data.json")
+INPUT  = Path("demand_data_consolidated.json")
+OUTPUT = Path("demand_data.json")
 
 # (distance threshold in metres, multiplier)
 TIERS = [
@@ -43,14 +44,13 @@ def multiplier_for(distance_m: int) -> float:
 
 def main() -> None:
     if not INPUT.exists():
-        sys.exit(f"ERROR: {INPUT} not found. Run demand_generator.py first "
-                 f"and `mv demand_data_out.json demand_data.json`.")
+        sys.exit(f"ERROR: {INPUT} not found. Run consolidate_pops.py first.")
 
     print(f"Loading {INPUT}...")
     data = json.loads(INPUT.read_text())
     pops = data.get("pops", [])
     if not pops:
-        sys.exit("ERROR: no pops in demand_data.json")
+        sys.exit(f"ERROR: no pops in {INPUT}")
 
     tier_counts = {m: 0 for _, m in TIERS}
     total_old = 0
@@ -73,7 +73,7 @@ def main() -> None:
         total_old += old
         total_new += new
 
-    INPUT.write_text(json.dumps(data, separators=(",", ":")))
+    OUTPUT.write_text(json.dumps(data, separators=(",", ":")))
 
     print(f"  Pops total:         {len(pops):,}")
     print(f"  Pops penalised:     {len(pops) - skipped:,}")
@@ -90,7 +90,7 @@ def main() -> None:
               f"{total_old / max(1, len(pops) - skipped):.0f}s "
               f"→ {total_new / max(1, len(pops) - skipped):.0f}s  "
               f"(+{delta:.1f}% in aggregate driving time)")
-    print(f"  Wrote {INPUT}")
+    print(f"  Wrote {OUTPUT}")
 
 
 if __name__ == "__main__":
