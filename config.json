@@ -9,8 +9,8 @@
     "bearing": 0
   },
   "creator": "james-lagreca",
-  "version": "1.1.0",
-  "population": 4456418,
+  "version": "1.1.1",
+  "population": 4456361,
   "demandDotScaling": 0.75,
   "buildingsIndexFile": "buildings_index.bin",
   "country": "AU"

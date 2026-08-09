@@ -1,3 +1,30 @@
+# v1.1.1 — Demand rebalance
+
+Origins are now merged onto a **density-graduated grid** instead of the
+distance-from-CBD rule v1.1.0 shipped with. That rule collapsed everything
+beyond 25 km into one point per SA2, which flattened the entire outer rail
+corridor — Frankston held 17,491 residents in a single point, Pakenham
+19,903, and Hastings had **no residential demand within 3 km of the
+station**. Station catchments out there were all-or-nothing.
+
+Cell size now follows local settlement density (SA1 land area is the proxy
+— the ABS sizes every SA1 to hold a similar population), so corridor towns
+stay sharp because they are genuinely dense, and only the rural gaps
+between them coarsen:
+
+| Anchor | points within 3 km | largest single point |
+|---|---|---|
+| Frankston | 16 → **82** | 17,491 → **1,109** |
+| Pakenham | 9 → **71** | 19,903 → **1,200** |
+| Cranbourne | 21 → **110** | 17,584 → **2,679** |
+| Hastings | 3 (0 residents) → **24** | — → 7,499 in the area |
+
+The inner ring collapses a little more to pay for it (0–10 km: 2,209 → 778
+points), and **jobs now cluster into real workplaces** — 2,531 employment
+points instead of jobs smeared across every residential block, with the
+top 100 sites holding 35% of all jobs. Pop count barely moved: 35,909 →
+**36,759**.
+
 # v1.1.0 — Simulation performance update
 
 The game fully simulates every pop (mode choice, transit paths, departure

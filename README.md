@@ -45,7 +45,7 @@ Until the registry submission lands (or if you're testing a newer version):
 
 **Basemap** — depot-generated PMTiles with 3D building extrusions, road network, place labels for cities/towns/suburbs/villages/neighbourhoods/hamlets/localities/quarters.
 
-**Demand modelling** — gravity model (β = 1.4, 5 km close-distance plateau, 4 destinations per residence, 80 km cap, 55% commute participation); SA2 Place-of-Work jobs distributed by inverse SA1 area (activity-centre concentration); outer-fringe SA1s collapsed to one point per SA2; same-origin commute flows consolidated toward stock ~200-person pops (`consolidate_pops.py`); distance-graduated peak-hour driving penalty (×1.1 / ×1.3 / ×1.5 / ×1.6 by trip length).
+**Demand modelling** — gravity model (β = 1.4, 5 km close-distance plateau, 4 destinations per residence, 80 km cap, 55% commute participation); SA2 Place-of-Work jobs distributed by inverse SA1 area, then sharpened into employment clusters (weight exponent + top-quartile cutoff) so workplaces concentrate in activity centres instead of smearing across every residential block; origins merged onto a **density-graduated spatial grid** (SA1 land area as the density proxy — dense urban ~450 m cells, suburban ~1 km, rural ~4 km, with an extra collapse factor inside 12 km of the CBD, and any SA1 holding 1,500+ jobs kept whole as a workplace site); same-origin commute flows consolidated toward stock ~200-person pops (`consolidate_pops.py`); distance-graduated peak-hour driving penalty (×1.1 / ×1.3 / ×1.5 / ×1.6 by trip length).
 
 ---
 
@@ -256,7 +256,14 @@ Most of the demand calibration lives in two files:
 - `DESTINATIONS_PER_RESIDENCE` — commute samples per origin (default 4). The main pop-count / sim-performance lever.
 - `EMPLOYMENT_RATE` — fraction of residents who commute (default 0.55).
 - `MAX_COMMUTE_M` — hard cap on commute distance.
-- `FRINGE_CBD_RADIUS_M` / `FRINGE_GEELONG_RADIUS_M` / `FRINGE_KEEP_JOBS` — outside both radii, SA1s with fewer jobs than the threshold merge into one point per SA2.
+- `DENSE_BIN_M` / `SUBURBAN_BIN_M` / `RURAL_BIN_M` + `DENSE_AREA_M2` / `SUBURBAN_AREA_M2` — origin grid cell size per density tier, keyed off SA1 land area. Smaller cells = more demand points = finer station catchments.
+- `INNER_BIN_FACTOR` — extra collapse inside `INNER_RADIUS_M` of the CBD, where SA1s are smallest.
+- `JOB_SITE_MIN_KEEP` — an SA1 with this many jobs is never binned away.
+- `JOB_CONCENTRATION_GAMMA` / `JOB_SITE_KEEP_FRAC` — how tightly employment clusters. Raising gamma or lowering the keep fraction pushes jobs into fewer, larger workplaces.
+
+Run `python build_base_demand.py --dry-run` to see the resulting point
+distribution by distance band (and the share of jobs in the top 100 sites)
+without waiting for OSRM routing.
 
 [`make_extent.py`](./make_extent.py):
 - `VERTICES` — the demand-extent polygon ring. Assertion lists (`MUST_KEEP` / `MUST_EXCLUDE`) gate every change.

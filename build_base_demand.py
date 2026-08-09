@@ -26,7 +26,9 @@ Run inside the depot conda env so geopandas is available:
     python build_base_demand.py
 """
 
+import argparse
 import json
+import math
 import sys
 import time
 import urllib.error
@@ -52,15 +54,40 @@ OUTPUT_FILE = "demand_data_fixed.json"
 # make_extent.py.
 EXTENT_POLYGON = "extent/mel_extent_v1_1.geojson"
 
-# Fringe aggregation: outside these radii, SA1s with few jobs merge into
-# one point per parent SA2. Keeps activity centres (Dandenong South,
-# Frankston CBD, East Werribee, Avalon) at full SA1 granularity while
-# halving the origin-point count on the rural/outer fringe.
-CBD_LONLAT              = (144.9631, -37.8136)
-GEELONG_LONLAT          = (144.357, -38.147)
-FRINGE_CBD_RADIUS_M     = 25_000
-FRINGE_GEELONG_RADIUS_M = 12_000
-FRINGE_KEEP_JOBS        = 2_000   # SA1s with >= this many jobs never merge
+# --- Origin binning -------------------------------------------------------
+# Origins are merged onto a spatial grid whose cell size follows local
+# settlement density, using SA1 land area as the density proxy: the ABS
+# sizes every SA1 to hold roughly the same population, so a small SA1 is
+# a dense suburb and a large one is paddocks.
+#
+# This replaced a distance-from-CBD rule that collapsed everything beyond
+# 25 km to one point per SA2 — which flattened the entire outer rail
+# corridor (Frankston held 17k residents in a single point, Hastings had
+# none within 3 km of the station). Density-based bins keep the corridor
+# towns sharp because they are genuinely dense, and only coarsen the
+# rural gaps between them.
+DENSE_AREA_M2      = 350_000     # <= this SA1 area counts as dense urban
+SUBURBAN_AREA_M2   = 2_000_000   # <= this counts as suburban
+DENSE_BIN_M        = 450         # grid cell for dense urban SA1s
+SUBURBAN_BIN_M     = 1_000       # grid cell for suburban SA1s
+RURAL_BIN_M        = 4_000       # grid cell for rural SA1s
+# The inner ring is where SA1s are smallest and most numerous, so it gets
+# an extra collapse factor on top of the density tier.
+CBD_LONLAT         = (144.9631, -37.8136)
+INNER_RADIUS_M     = 12_000
+INNER_BIN_FACTOR   = 1.35
+# Employment sites are never binned away — an SA1 with this many jobs
+# stays its own point so activity centres remain distinct destinations.
+JOB_SITE_MIN_KEEP  = 1_500
+
+# --- Job concentration ----------------------------------------------------
+# Each SA2's Place-of-Work total is split across its SA1s by inverse area.
+# Raw inverse-area weighting still leaves every residential SA1 holding
+# some jobs, so workplaces end up smeared evenly across the suburbs. These
+# two knobs sharpen that into recognisable employment clusters: raise the
+# weights to a power, then keep only the top fraction of SA1s per SA2.
+JOB_CONCENTRATION_GAMMA = 2.5
+JOB_SITE_KEEP_FRAC      = 0.25   # top 25% of SA1s per SA2 get all its jobs
 
 # File-discovery candidates (different ABS download bundles use slightly
 # different names; this lets you not have to rename your downloads).
@@ -294,6 +321,24 @@ def add_jobs(sa1: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     sa1["sa2_weight"] = (sa1["inv_area"]
                          / sa1["sa2_total_inv_area"].clip(lower=1e-30))
 
+    # Sharpen the weights into employment clusters: a power raises the
+    # contrast between the tiny activity-centre SA1 and its residential
+    # neighbours, then everything outside the top fraction of each SA2 is
+    # zeroed so jobs land in a few real workplaces instead of spreading
+    # evenly over every residential block.
+    n_before = (sa1["sa2_weight"] > 0).sum()
+    sa1["job_weight"] = sa1["sa2_weight"] ** JOB_CONCENTRATION_GAMMA
+    rank = (sa1.groupby("SA2_CODE_2021")["job_weight"]
+               .rank(ascending=False, method="first"))
+    keep_n = np.maximum(
+        1,
+        np.ceil(sa1.groupby("SA2_CODE_2021")["job_weight"].transform("size")
+                * JOB_SITE_KEEP_FRAC),
+    )
+    sa1.loc[rank > keep_n, "job_weight"] = 0.0
+    jw_total = sa1.groupby("SA2_CODE_2021")["job_weight"].transform("sum")
+    sa1["sa2_weight"] = sa1["job_weight"] / jw_total.clip(lower=1e-30)
+
     # Apply SA2 POW counts via the per-SA1 weight.
     sa1 = sa1.merge(
         pow_df[["SA2_CODE_2021", "jobs"]].rename(columns={"jobs": "sa2_jobs"}),
@@ -303,10 +348,14 @@ def add_jobs(sa1: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     sa1["jobs"] = (sa1["sa2_jobs"] * sa1["sa2_weight"]).round().astype(int)
 
     sa1 = sa1.drop(columns=[
-        "area_m2", "inv_area", "sa2_total_inv_area", "sa2_weight", "sa2_jobs",
+        "inv_area", "sa2_total_inv_area", "sa2_weight", "sa2_jobs",
+        "job_weight",
     ])
-    print(f"      {sa1['jobs'].sum():,} jobs concentrated across "
-          f"{(sa1['jobs'] > 0).sum():,} SA1s in bbox")
+    n_after = (sa1["jobs"] > 0).sum()
+    top100 = sa1.nlargest(100, "jobs")["jobs"].sum()
+    print(f"      {sa1['jobs'].sum():,} jobs clustered into "
+          f"{n_after:,} SA1s (was spread over {n_before:,}); "
+          f"top 100 sites hold {100 * top100 / max(1, sa1['jobs'].sum()):.0f}%")
     return sa1
 
 
@@ -314,59 +363,111 @@ def add_jobs(sa1: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 # Points + gravity model
 # ---------------------------------------------------------------------------
 
-def aggregate_fringe(sa1: gpd.GeoDataFrame) -> pd.DataFrame:
-    """[6/7] Collapse outer-fringe SA1s to one point per parent SA2.
+def bin_origins(sa1: gpd.GeoDataFrame) -> pd.DataFrame:
+    """[6/7] Merge SA1s onto a spatial grid sized by local density.
 
-    An SA1 merges into its SA2 aggregate when it is outside BOTH the CBD
-    and Geelong radii AND has fewer than FRINGE_KEEP_JOBS jobs. Job-heavy
-    fringe SA1s (activity centres, Avalon Airport) survive at full
-    granularity. Aggregate location = residents-weighted centroid of the
-    member SA1 centroids (jobs-weighted if the group has no residents).
+    Cell size comes from the SA1's own land area (the ABS builds every
+    SA1 to hold a similar population, so area is a direct density proxy):
+    dense urban SA1s get DENSE_BIN_M, suburban SUBURBAN_BIN_M, rural
+    RURAL_BIN_M, with an extra INNER_BIN_FACTOR inside the inner ring
+    where SA1s are smallest and most numerous. SA1s holding at least
+    JOB_SITE_MIN_KEEP jobs are never binned, so employment centres stay
+    distinct destinations.
 
-    Returns a plain DataFrame [point_id, lon, lat, residents, jobs] mixing
-    SA1_<code> core rows with SA2_<code> aggregate rows.
+    Merged points inherit the SA1 code of their largest-residents member,
+    keeping the SA1_<code> id convention (and therefore the SA2/SA3 codes
+    that consolidate_pops.py buckets on) intact and unique.
+
+    Returns a plain DataFrame [point_id, lon, lat, residents, jobs].
     """
     cent = sa1.geometry.centroid
     df = pd.DataFrame({
         "sa1":       sa1["SA1_CODE_2021"].astype(str).to_numpy(),
-        "sa2":       sa1["SA2_CODE_2021"].astype(str).to_numpy(),
         "lon":       cent.x.to_numpy(),
         "lat":       cent.y.to_numpy(),
         "residents": sa1["residents"].to_numpy(),
         "jobs":      sa1["jobs"].to_numpy(),
+        "area_m2":   sa1["area_m2"].to_numpy(),
     })
 
+    area = df["area_m2"].to_numpy()
+    cell = np.where(area <= DENSE_AREA_M2, DENSE_BIN_M,
+           np.where(area <= SUBURBAN_AREA_M2, SUBURBAN_BIN_M, RURAL_BIN_M))
     d_cbd = haversine_m(df["lat"].to_numpy(), df["lon"].to_numpy(),
                         CBD_LONLAT[1], CBD_LONLAT[0])
-    d_glg = haversine_m(df["lat"].to_numpy(), df["lon"].to_numpy(),
-                        GEELONG_LONLAT[1], GEELONG_LONLAT[0])
-    fringe = ((d_cbd > FRINGE_CBD_RADIUS_M)
-              & (d_glg > FRINGE_GEELONG_RADIUS_M)
-              & (df["jobs"].to_numpy() < FRINGE_KEEP_JOBS))
+    cell = np.where(d_cbd <= INNER_RADIUS_M, cell * INNER_BIN_FACTOR, cell)
 
-    core = df[~fringe].copy()
-    core["point_id"] = "SA1_" + core["sa1"]
+    # Local equirectangular metres — accurate enough for grid binning.
+    lat0 = float(np.mean(df["lat"].to_numpy()))
+    mx = df["lon"].to_numpy() * 111_320.0 * math.cos(math.radians(lat0))
+    my = df["lat"].to_numpy() * 110_540.0
+
+    keep_whole = df["jobs"].to_numpy() >= JOB_SITE_MIN_KEEP
+    # Bin key includes the cell size so differently-sized tiers never share
+    # a bin; job sites get a unique key each so they pass through alone.
+    keys = []
+    for i in range(len(df)):
+        if keep_whole[i]:
+            keys.append(("site", i, 0))
+        else:
+            c = cell[i]
+            keys.append((int(c), int(mx[i] // c), int(my[i] // c)))
+    df["_key"] = keys
 
     rows = []
-    for sa2, g in df[fringe].groupby("sa2"):
+    for _key, g in df.groupby("_key", sort=False):
+        if len(g) == 1:
+            r = g.iloc[0]
+            rows.append({
+                "point_id":  f"SA1_{r['sa1']}",
+                "lon":       float(r["lon"]),
+                "lat":       float(r["lat"]),
+                "residents": int(r["residents"]),
+                "jobs":      int(r["jobs"]),
+            })
+            continue
         w = g["residents"].to_numpy(dtype=float)
         if w.sum() <= 0:
             w = g["jobs"].to_numpy(dtype=float)
         if w.sum() <= 0:
             w = np.ones(len(g))
+        lead = g.loc[g["residents"].idxmax()] if g["residents"].max() > 0 \
+            else g.iloc[0]
         rows.append({
-            "point_id":  f"SA2_{sa2}",
+            "point_id":  f"SA1_{lead['sa1']}",
             "lon":       float(np.average(g["lon"].to_numpy(), weights=w)),
             "lat":       float(np.average(g["lat"].to_numpy(), weights=w)),
             "residents": int(g["residents"].sum()),
             "jobs":      int(g["jobs"].sum()),
         })
-    cols = ["point_id", "lon", "lat", "residents", "jobs"]
-    agg = pd.DataFrame(rows, columns=cols)
 
-    print(f"[6/7] Fringe aggregation: {int(fringe.sum()):,} fringe SA1s -> "
-          f"{len(agg):,} SA2 points; {len(core):,} core SA1s kept")
-    return pd.concat([core[cols], agg[cols]], ignore_index=True)
+    cols = ["point_id", "lon", "lat", "residents", "jobs"]
+    out = pd.DataFrame(rows, columns=cols)
+    merged = len(df) - len(out)
+    print(f"[6/7] Density binning: {len(df):,} SA1s -> {len(out):,} origins "
+          f"({merged:,} merged away, {int(keep_whole.sum()):,} job sites kept whole)")
+    return out
+
+
+def report_distribution(df: pd.DataFrame) -> None:
+    """Print the point/resident spread by distance from the CBD so the bin
+    parameters can be tuned without a full routing run."""
+    d = haversine_m(df["lat"].to_numpy(), df["lon"].to_numpy(),
+                    CBD_LONLAT[1], CBD_LONLAT[0]) / 1000.0
+    print(f"\n  {'band km':>10} {'points':>8} {'residents':>11} "
+          f"{'res/pt':>8} {'jobs':>10} {'max res':>8}")
+    for lo, hi in [(0, 10), (10, 20), (20, 25), (25, 35),
+                   (35, 50), (50, 500)]:
+        m = (d >= lo) & (d < hi)
+        sub = df[m]
+        if not len(sub):
+            continue
+        print(f"  {lo:4}-{hi:<5} {len(sub):8,} {sub['residents'].sum():11,} "
+              f"{sub['residents'].mean():8.0f} {sub['jobs'].sum():10,} "
+              f"{sub['residents'].max():8,}")
+    jobs_sorted = df.nlargest(100, "jobs")["jobs"].sum()
+    print(f"  points with jobs: {(df['jobs'] > 0).sum():,} / {len(df):,}; "
+          f"top 100 hold {100 * jobs_sorted / max(1, df['jobs'].sum()):.0f}% of jobs")
 
 
 def build_points(df: pd.DataFrame) -> list[dict]:
@@ -497,22 +598,34 @@ def route_all(points, flows):
 # ---------------------------------------------------------------------------
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true",
+                    help="build points and print the distribution, then stop "
+                         "(no OSRM needed) — for tuning the bin parameters")
+    args = ap.parse_args()
+
     print("=" * 60)
     print("  Melbourne base demand generator (ABS 2021 Census)")
     print("=" * 60)
-    check_osrm()
-    print("  OSRM reachable.")
+    if not args.dry_run:
+        check_osrm()
+        print("  OSRM reachable.")
     print()
 
     sa1    = load_sa1()
     sa1    = add_jobs(sa1)
-    pts_df = aggregate_fringe(sa1)
+    pts_df = bin_origins(sa1)
+    report_distribution(pts_df)
     points = build_points(pts_df)
     print()
     print(f"Total points:    {len(points):,}")
     print(f"Total residents: {sum(p['residents'] for p in points):,}")
     print(f"Total jobs:      {sum(p['jobs'] for p in points):,}")
     print()
+
+    if args.dry_run:
+        print("Dry run — stopping before the gravity model and routing.")
+        return
 
     flows = gravity_commutes(points)
     print(f"Generated {len(flows):,} candidate commute flows")
